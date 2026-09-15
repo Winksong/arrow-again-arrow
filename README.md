@@ -91,6 +91,36 @@ python tools/playtest.py --json docs/out.json # 导出 JSON
 
 完整报告见 `docs/playtest-report.txt`。
 
+## 干净环境验证
+
+为保证「别人拿到这个仓库就能跑起来」，本项目在**全新的克隆目录**中做过完整验证：
+从远程仓库重新 `git clone` → 新建虚拟环境 → 按 README 安装依赖 → 跑测试 → 启动游戏，
+确认没有任何依赖本机缓存或未提交文件的情况。
+
+验证步骤（照抄即可复现）：
+
+```bash
+git clone https://github.com/Winksong/arrow-again-arrow.git verify-clean
+cd verify-clean
+python -m venv .venv
+.venv\Scripts\activate            # macOS / Linux: source .venv/bin/activate
+pip install -r requirements.txt
+python -m pytest                  # 期望 127 passed
+python main.py                    # 期望正常进入开始界面
+```
+
+实测结果：
+
+| 检查项 | 结果 |
+| --- | --- |
+| `pip install -r requirements.txt` | 成功（pygame-ce 2.5.8、pytest 9.1.1） |
+| `python -m pytest` | **127 passed in 4.16s** |
+| 4 个关卡求解器校验 | 全部可解，解长分别为 4 / 6 / 8 / 10 |
+| 按求解器顺序零失误点击通关 | 4 关均到达 `success`，失误剩余 3 |
+| 连续点击被挡箭头 5 次 | 正确进入 `failed`，失误剩余 0 |
+| 连续渲染 300 帧 | 无异常 |
+| `git status` | 干净，无未跟踪文件 |
+
 ## 环境要求
 
 - Python 3.11+（开发环境为 3.13）
@@ -138,10 +168,15 @@ arrow-again-arrow/
 ├─ tests/
 │  ├─ test_smoke.py         # 骨架自检
 │  ├─ test_board.py         # 路径检测 / 边界 / 空格
-│  ├─ test_flow.py          # 作业要求 T01～T06
-│  └─ test_levels.py        # 每关可解、数据合法
+│  ├─ test_click.py         # 点击三态判定（T01～T03）
+│  ├─ test_feedback.py      # 失误计数与碰撞反馈
+│  ├─ test_flow.py          # 作业要求 T04～T06、状态机、结果界面
+│  ├─ test_levels.py        # 每关可解、数据合法
+│  └─ test_playtest.py      # 试玩脚本自身
 ├─ tools/
 │  └─ playtest.py           # 关卡试玩脚本
+├─ docs/
+│  └─ playtest-report.txt   # 试玩报告（脚本生成）
 ├─ requirements.txt
 ├─ pytest.ini
 └─ README.md
@@ -169,4 +204,4 @@ arrow-again-arrow/
 - [x] Step 7 状态机与结果界面（开始 / 通关 / 失败 / 全通关）
 - [x] Step 8 自动化测试 T01～T06
 - [x] Step 9 关卡试玩脚本
-- [ ] Step 10 干净环境克隆验证
+- [x] Step 10 干净环境克隆验证
