@@ -519,3 +519,116 @@ def draw_banner(surface: pygame.Surface, rect: pygame.Rect, text: str,
     img = font.render(text, True, color)
     img.set_alpha(int(255 * alpha))
     surface.blit(img, (rect.x + 14, rect.centery - img.get_height() // 2))
+
+
+# --------------------------------------------------------------------------
+# 结果卡片（Step 7）
+# --------------------------------------------------------------------------
+# ⚠️ 关键约定：结果卡片必须用 **不透明底 + 卡片内相对定位**。
+# 早期用「半透明遮罩 + 居中文字」的写法，会让文字与背后的棋盘重叠、
+# 压住按钮，观感很差。所有元素坐标一律相对卡片 rect 计算。
+
+
+class Button:
+    """一个可点击的按钮（矩形 + 文案 + 配色），坐标相对卡片。"""
+
+    def __init__(self, rect: pygame.Rect, text: str,
+                 color: tuple[int, int, int] = OK_COLOR) -> None:
+        self.rect = rect
+        self.text = text
+        self.color = color
+
+    def hit(self, pos: tuple[int, int]) -> bool:
+        return self.rect.collidepoint(pos)
+
+    def draw(self, surface: pygame.Surface,
+             hovered: bool = False) -> None:
+        bg = tuple(min(c + 28, 255) for c in self.color) if hovered \
+            else self.color
+        pygame.draw.rect(surface, (14, 16, 22), self.rect.move(0, 3),
+                         border_radius=10)
+        pygame.draw.rect(surface, bg, self.rect, border_radius=10)
+        if hovered:
+            pygame.draw.rect(surface, (255, 255, 255), self.rect,
+                             width=2, border_radius=10)
+
+        font = load_font(22, bold=True)
+        img = font.render(self.text, True, (18, 20, 28))
+        surface.blit(img, img.get_rect(center=self.rect.center))
+
+
+def draw_result_card(surface: pygame.Surface, area: pygame.Rect, title: str,
+                     subtitle: str, lines: list[str],
+                     buttons: list[Button], title_color: tuple[int, int, int],
+                     hovered: Button | None = None,
+                     dim_background: bool = True) -> None:
+    """绘制结果卡片（通关 / 失败共用）。
+
+    area:    卡片区域（屏幕坐标）
+    buttons: 按钮列表，坐标必须**相对卡片** —— 本函数会做偏移
+    """
+    if dim_background:
+        # 压暗背景，但卡片本身是不透明的，文字不会与棋盘重叠
+        veil = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
+        veil.fill((10, 12, 18, 170))
+        surface.blit(veil, (0, 0))
+
+    card = area
+    # 阴影 + 卡片主体（完全不透明）
+    pygame.draw.rect(surface, (12, 14, 20), card.move(0, 6), border_radius=20)
+    pygame.draw.rect(surface, CARD_BG, card, border_radius=20)
+    pygame.draw.rect(surface, title_color, card, width=3, border_radius=20)
+
+    # ---- 卡片内所有元素相对 card 定位 ----
+    title_img = load_font(42, bold=True).render(title, True, title_color)
+    surface.blit(title_img, title_img.get_rect(
+        center=(card.centerx, card.y + 74)))
+
+    sub_img = load_font(22).render(subtitle, True, TEXT_DIM)
+    surface.blit(sub_img, sub_img.get_rect(
+        center=(card.centerx, card.y + 122)))
+
+    # 分隔线
+    pygame.draw.line(surface, (72, 82, 106),
+                     (card.x + 40, card.y + 152),
+                     (card.right - 40, card.y + 152), 2)
+
+    y = card.y + 182
+    for line in lines:
+        img = load_font(20).render(line, True, TEXT_MAIN)
+        surface.blit(img, img.get_rect(center=(card.centerx, y)))
+        y += 32
+
+    for btn in buttons:
+        btn.draw(surface, hovered=btn is hovered)
+
+
+def card_layout(screen_size: tuple[int, int], width: int = 460,
+                height: int = 380) -> pygame.Rect:
+    """结果卡片在屏幕中央的矩形。"""
+    w, h = screen_size
+    return pygame.Rect((w - width) // 2, (h - height) // 2, width, height)
+
+
+def make_buttons(card: pygame.Rect, specs: list[tuple[str, str]],
+                 y: int | None = None) -> list[Button]:
+    """根据卡片位置生成一排按钮。
+
+    specs: [(文案, 类型), ...]，类型取 "ok" / "warn" / "dim"
+    返回的按钮 rect 已是屏幕坐标（相对卡片算好后加上偏移）。
+    """
+    colors = {"ok": OK_COLOR, "warn": (255, 183, 77), "dim": (120, 132, 158)}
+    if y is None:
+        y = card.bottom - 92
+
+    n = len(specs)
+    btn_w, btn_h, gap = 170, 52, 20
+    total_w = n * btn_w + (n - 1) * gap
+    x = card.centerx - total_w // 2
+
+    buttons: list[Button] = []
+    for text, kind in specs:
+        rect = pygame.Rect(x, y, btn_w, btn_h)
+        buttons.append(Button(rect, text, colors.get(kind, OK_COLOR)))
+        x += btn_w + gap
+    return buttons

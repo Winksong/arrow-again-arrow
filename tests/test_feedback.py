@@ -98,7 +98,10 @@ def test_restart_restores_mistakes():
         app.restart()
         assert app.session.mistakes_left == 3, "重开应恢复初始失误次数"
         assert app.initial_mistakes == 3
+        # 恢复的布局应与关卡数据一致（2 个箭头：互指的一对）
         assert app.board.remaining() == 2, "重开应恢复箭头布局"
+        assert app.board.arrow_raw(0, 0) is not None
+        assert app.board.arrow_raw(0, 2) is not None
     finally:
         app.shutdown()
 
