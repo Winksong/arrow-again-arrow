@@ -16,7 +16,10 @@ import pygame
 
 from .model import BLOCKED, Arrow, Board
 
-# --------------------------------------------------------------------------
+# 动画时长（秒）
+FLY_DURATION = 0.36
+SHAKE_DURATION = 0.42
+
 # 配色与字号
 # --------------------------------------------------------------------------
 
@@ -241,10 +244,16 @@ class BoardLayout:
 # --------------------------------------------------------------------------
 
 def draw_board(surface: pygame.Surface, board: Board, layout: BoardLayout,
-               shake: dict[tuple[int, int], int] | None = None,
-               hover: tuple[int, int] | None = None) -> None:
-    """绘制棋盘网格与全部箭头。"""
+               shake: dict[tuple[int, int], float] | None = None,
+               hover: tuple[int, int] | None = None,
+               flying: dict[Arrow, float] | None = None) -> None:
+    """绘制棋盘网格与全部箭头。
+
+    shake:  {(row, col): 像素偏移}，被阻挡时的晃动
+    flying: {arrow: 已播放时长}，飞出动画（平移 + 淡出 + 残影）
+    """
     shake = shake or {}
+    flying = flying or {}
 
     # 棋盘底板
     pad = 14
@@ -266,14 +275,61 @@ def draw_board(surface: pygame.Surface, board: Board, layout: BoardLayout,
             fill = (56, 64, 84) if is_hover else (40, 45, 60)
             pygame.draw.rect(surface, fill, rect, border_radius=max(8, layout.cell // 5))
 
-    # 箭头
+    # 箭头：先画静止的，再画飞出的（盖在最上层）
+    static: list[Arrow] = []
+    moving: list[Arrow] = []
     for arrow in board.arrows:
+        (moving if arrow in flying else static).append(arrow)
+
+    for arrow in static:
         rect = layout.cell_rect(arrow.row, arrow.col)
         draw_arrow_badge(
             surface, rect, arrow,
-            shake_offset=shake.get((arrow.row, arrow.col), 0),
+            shake_offset=int(shake.get((arrow.row, arrow.col), 0)),
             highlight=hover == (arrow.row, arrow.col),
         )
+
+    for arrow in moving:
+        _, offset, alpha = fly_transform(arrow, flying[arrow])
+        # 残影：跟随在后、更淡
+        for ghost_i, ghost_alpha in ((0.16, 0.28), (0.08, 0.5)):
+            _, g_offset, _ = fly_transform(arrow, flying[arrow] * (1 - ghost_i))
+            _blit_flying(surface, layout, arrow, g_offset, alpha * ghost_alpha)
+        _blit_flying(surface, layout, arrow, offset, alpha)
+
+
+def fly_transform(arrow: Arrow, t_sec: float) -> tuple[float, tuple[float, float], float]:
+    """飞出动画的插值：返回 (进度, 像素偏移, 不透明度 0~1)。
+
+    带轻微加速（t**1.35），观感比匀速自然。
+    """
+    p = min(t_sec / FLY_DURATION, 1.0)
+    eased = p ** 1.35
+
+    dr, dc = arrow.delta
+    step = 74.0                      # 每个格子的位移像素
+    offset = (dc * step * eased * 2.2, dr * step * eased * 2.2)
+
+    # 前 25% 保持不透明，之后淡出
+    alpha = 1.0 if p < 0.25 else max(1.0 - (p - 0.25) / 0.75, 0.0)
+    return p, offset, alpha
+
+
+def _blit_flying(surface: pygame.Surface, layout: BoardLayout, arrow: Arrow,
+                 offset: tuple[float, float], alpha: float) -> None:
+    """把飞出中的箭头绘制到临时表面再整体平移 + 淡出。"""
+    if alpha <= 0.02:
+        return
+    cell = layout.cell
+    pad = 8
+    size = cell + pad * 2
+    tmp = pygame.Surface((size, size), pygame.SRCALPHA)
+    rect = pygame.Rect(pad, pad, cell, cell)
+    draw_arrow_badge(tmp, rect, arrow, highlight=True)
+    tmp.set_alpha(int(255 * alpha))
+
+    cx, cy = layout.cell_center(arrow.row, arrow.col)
+    surface.blit(tmp, (cx - size // 2 + offset[0], cy - size // 2 + offset[1]))
 
 
 def draw_text(surface: pygame.Surface, text: str, size: int,

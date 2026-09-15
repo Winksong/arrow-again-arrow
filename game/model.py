@@ -183,3 +183,99 @@ class Board:
         for r, c, d in arrows:
             board.add(Arrow(row=r, col=c, direction=d))
         return board
+
+
+# --------------------------------------------------------------------------
+# 点击判定结果
+# --------------------------------------------------------------------------
+
+CLICK_EMPTY = "empty"       # 点空格 / 棋盘外，不扣失误
+CLICK_FLY = "fly"           # 前方无阻挡，箭头飞出
+CLICK_BLOCKED = "blocked"   # 前方有阻挡，留在原位并扣失误
+
+# 游戏状态
+STATE_PLAYING = "playing"
+STATE_SUCCESS = "success"
+STATE_FAILED = "failed"
+
+
+@dataclass
+class Session:
+    """一局游戏：把点击判定、失误计数、胜负结算收在一处。
+
+    本类同样 **不依赖 pygame**，因此 T01～T06 可以直接调用它，
+    也可以由 UI 层通过真实鼠标事件驱动它，两条路径共用同一套逻辑。
+    """
+
+    board: Board
+    mistakes_left: int = 3
+    state: str = STATE_PLAYING
+    arrows_total: int = 0
+
+    def __post_init__(self) -> None:
+        if self.arrows_total == 0:
+            self.arrows_total = self.board.remaining()
+
+    # ---------- 点击 ----------
+
+    def click(self, r: int, c: int) -> str:
+        """处理一次点击，返回判定结果。
+
+        规则要点：
+            - 点空格 / 棋盘外 → 返回 empty，**不扣失误**；
+            - 前方无阻挡       → 标记 flying，返回 fly；
+            - 前方有阻挡       → 标记 blocked，失误 -1，返回 blocked。
+        """
+        if self.state != STATE_PLAYING:
+            return CLICK_EMPTY
+
+        if not self.board.in_bounds(r, c):
+            return CLICK_EMPTY
+
+        arrow = self.board.arrow_at(r, c)
+        if arrow is None:
+            return CLICK_EMPTY
+
+        # 先清掉上一次的 blocked 标记，避免状态残留
+        for a in self.board.arrows:
+            if a.state == BLOCKED:
+                a.state = IDLE
+
+        if self.board.path_clear(arrow):
+            arrow.state = FLYING
+            arrow.anim_t = 0.0
+            return CLICK_FLY
+
+        arrow.state = BLOCKED
+        arrow.anim_t = 0.0
+        self.mistakes_left -= 1
+        if self.mistakes_left <= 0:
+            self.mistakes_left = 0          # 不能降到 0 以下
+            self.state = STATE_FAILED
+        return CLICK_BLOCKED
+
+    # ---------- 动画回调 ----------
+
+    def on_fly_finished(self, arrow: Arrow) -> None:
+        """飞出动画播完后调用：真正从棋盘移除，并判定是否通关。
+
+        胜负判定放在这里，避免"动画还没播完就结算"的观感问题。
+        """
+        self.board.remove(arrow)
+        arrow.state = IDLE
+        if self.state == STATE_PLAYING and self.board.is_empty():
+            self.state = STATE_SUCCESS
+
+    # ---------- 结算 ----------
+
+    def is_over(self) -> bool:
+        return self.state in (STATE_SUCCESS, STATE_FAILED)
+
+    @property
+    def arrows_cleared(self) -> int:
+        """已消除箭头数（含正在飞出的）。"""
+        return self.arrows_total - self.board.remaining() - self._flying_count()
+
+    def _flying_count(self) -> int:
+        return sum(1 for a in self.board.arrows if a.state == FLYING)
+
