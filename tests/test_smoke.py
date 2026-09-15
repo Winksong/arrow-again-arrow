@@ -5,12 +5,6 @@
 
 from __future__ import annotations
 
-import os
-
-# 无头驱动：本文件后续若引入 pygame 也不受影响
-os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
-os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
-
 
 def test_package_importable():
     import game
