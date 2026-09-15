@@ -19,6 +19,12 @@ from .model import BLOCKED, Arrow, Board
 # 动画时长（秒）
 FLY_DURATION = 0.36
 SHAKE_DURATION = 0.42
+# 碰撞反馈总时长：前段回弹，之后左右晃动
+BLOCK_DURATION = 0.50
+# 浮动文字存活时长
+FLOAT_DURATION = 0.80
+# 顶部提示横幅存活时长
+BANNER_DURATION = 1.30
 
 # 配色与字号
 # --------------------------------------------------------------------------
@@ -155,25 +161,39 @@ def draw_arrow_glyph(surface: pygame.Surface, center: tuple[int, int], radius: i
 
 
 def draw_arrow_badge(surface: pygame.Surface, rect: pygame.Rect, arrow: Arrow,
-                     shake_offset: int = 0, highlight: bool = False) -> None:
+                     shake_offset: float = 0, highlight: bool = False,
+                     recoil: tuple[float, float] = (0.0, 0.0),
+                     flash: float = 0.0) -> None:
     """画一个箭头徽章：圆角底板 + 阴影 + 箭头图形。
 
-    shake_offset 为被阻挡晃动时的水平偏移。
+    shake_offset: 被阻挡时的水平晃动偏移
+    recoil:       碰撞回弹偏移 (dx, dy)，沿被挡方向前推后弹回
+    flash:        闪红强度 0~1，1 最红
     """
-    color = DIR_COLORS[arrow.direction]
-    if arrow.state == BLOCKED:
-        color = DANGER
+    base_color = DIR_COLORS[arrow.direction]
+    color = base_color
+    if arrow.state == BLOCKED or flash > 0:
+        # 在原本颜色与危险红之间插值。
+        # 上限只到 0.75：保留一部分原方向色，避免箭头变成一团红、
+        # 让人看不出它原本朝哪边（方向是判定依据，不能丢）。
+        t = max(flash * 0.75, 0.55 if arrow.state == BLOCKED else 0.0)
+        color = tuple(
+            int(base_color[i] + (DANGER[i] - base_color[i]) * t) for i in range(3)
+        )
 
-    r = rect.move(shake_offset, 0)
+    r = rect.move(int(shake_offset + recoil[0]), int(recoil[1]))
     radius = max(8, r.height // 5)
 
     # 阴影
     shadow = r.move(0, 3)
     pygame.draw.rect(surface, (14, 16, 22), shadow, border_radius=radius)
-    # 底板
-    pygame.draw.rect(surface, GRID_BG, r, border_radius=radius)
+    # 底板：被挡时略带红底
+    bg = GRID_BG
+    if flash > 0 or arrow.state == BLOCKED:
+        bg = tuple(int(GRID_BG[i] + (72 - GRID_BG[i]) * 0.55) for i in range(3))
+    pygame.draw.rect(surface, bg, r, border_radius=radius)
     # 高光边框
-    border = color if highlight else GRID_LINE
+    border = color if (highlight or flash > 0 or arrow.state == BLOCKED) else GRID_LINE
     pygame.draw.rect(surface, border, r, width=2, border_radius=radius)
 
     draw_arrow_glyph(
@@ -183,6 +203,47 @@ def draw_arrow_badge(surface: pygame.Surface, rect: pygame.Rect, arrow: Arrow,
         arrow.direction,
         color,
     )
+
+
+def block_recoil(arrow: Arrow, t_sec: float) -> tuple[float, float]:
+    """碰撞回弹：沿被挡方向先前推一点再弹回，观感更"撞到了"。
+
+    返回 (dx, dy) 像素偏移。
+    """
+    p = min(max(t_sec / BLOCK_DURATION, 0.0), 1.0)
+    if p >= 1.0:
+        return (0.0, 0.0)
+
+    dr, dc = arrow.delta
+    # 0~0.18 前推 6px，0.18~0.5 弹回到 0（带一次轻微过冲）
+    if p < 0.18:
+        k = p / 0.18
+        push = 6.0 * k
+    elif p < 0.45:
+        k = (p - 0.18) / 0.27
+        push = 6.0 * (1 - k) - 2.0 * math.sin(k * math.pi)
+    else:
+        push = 0.0
+    return (dc * push, dr * push)
+
+
+def block_flash(t_sec: float) -> float:
+    """闪红强度：快速冲高，随后衰减到 0。"""
+    p = min(max(t_sec / BLOCK_DURATION, 0.0), 1.0)
+    if p >= 1.0:
+        return 0.0
+    if p < 0.1:
+        return p / 0.1
+    return max(1.0 - (p - 0.1) / 0.9, 0.0)
+
+
+def block_shake(t_sec: float) -> float:
+    """晃动偏移：后段左右衰减摆动。"""
+    p = min(max(t_sec / BLOCK_DURATION, 0.0), 1.0)
+    if p >= 1.0 or p < 0.18:
+        return 0.0
+    decay = 1.0 - (p - 0.18) / (1.0 - 0.18)
+    return math.sin((p - 0.18) * 62) * 7.5 * decay
 
 
 # --------------------------------------------------------------------------
@@ -246,14 +307,17 @@ class BoardLayout:
 def draw_board(surface: pygame.Surface, board: Board, layout: BoardLayout,
                shake: dict[tuple[int, int], float] | None = None,
                hover: tuple[int, int] | None = None,
-               flying: dict[Arrow, float] | None = None) -> None:
+               flying: dict[Arrow, float] | None = None,
+               blocking: dict[Arrow, float] | None = None) -> None:
     """绘制棋盘网格与全部箭头。
 
-    shake:  {(row, col): 像素偏移}，被阻挡时的晃动
-    flying: {arrow: 已播放时长}，飞出动画（平移 + 淡出 + 残影）
+    shake:    {(row, col): 像素偏移}，被阻挡时的晃动
+    flying:   {arrow: 已播放时长}，飞出动画（平移 + 淡出 + 残影）
+    blocking: {arrow: 已播放时长}，碰撞反馈（回弹 + 闪红 + 晃动）
     """
     shake = shake or {}
     flying = flying or {}
+    blocking = blocking or {}
 
     # 棋盘底板
     pad = 14
@@ -283,10 +347,22 @@ def draw_board(surface: pygame.Surface, board: Board, layout: BoardLayout,
 
     for arrow in static:
         rect = layout.cell_rect(arrow.row, arrow.col)
+        t = blocking.get(arrow)
+        if t is not None:
+            recoil = block_recoil(arrow, t)
+            flash = block_flash(t)
+            shake_off = block_shake(t)
+        else:
+            recoil = (0.0, 0.0)
+            flash = 0.0
+            shake_off = shake.get((arrow.row, arrow.col), 0.0)
+
         draw_arrow_badge(
             surface, rect, arrow,
-            shake_offset=int(shake.get((arrow.row, arrow.col), 0)),
+            shake_offset=shake_off,
             highlight=hover == (arrow.row, arrow.col),
+            recoil=recoil,
+            flash=flash,
         )
 
     for arrow in moving:
@@ -345,3 +421,101 @@ def draw_text(surface: pygame.Surface, text: str, size: int,
         rect.topleft = pos
     surface.blit(img, rect)
     return rect
+
+
+# --------------------------------------------------------------------------
+# Step 5：失误次数可视化
+# --------------------------------------------------------------------------
+
+def draw_mistake_hearts(surface: pygame.Surface, pos: tuple[int, int],
+                        left: int, total: int, pulse: float = 0.0) -> pygame.Rect:
+    """用「心/盾」图标显示剩余失误次数。
+
+    剩余为图标亮色，已消耗为空心暗色；pulse 为刚扣失误时的闪动强度。
+    返回整体矩形，便于布局。
+    """
+    size = 22
+    gap = 8
+    x, y = pos
+    r = size // 2
+
+    for i in range(total):
+        cx = x + i * (size + gap) + r
+        cy = y + r
+        alive = i < left
+        if alive:
+            color = OK_COLOR if left > 1 else (255, 183, 77)
+            if pulse > 0:
+                color = tuple(
+                    int(color[j] + (DANGER[j] - color[j]) * pulse) for j in range(3)
+                )
+            pygame.draw.circle(surface, color, (cx, cy), r)
+            pygame.draw.circle(surface, (255, 255, 255), (cx - 3, cy - 4), 2)
+        else:
+            pygame.draw.circle(surface, (56, 62, 78), (cx, cy), r)
+            pygame.draw.circle(surface, (78, 86, 106), (cx, cy), r, width=2)
+
+    w = total * size + (total - 1) * gap
+    return pygame.Rect(x, y, w, size)
+
+
+# --------------------------------------------------------------------------
+# Step 5：浮动文字（+/- 提示）
+# --------------------------------------------------------------------------
+
+def draw_float_text(surface: pygame.Surface, text: str,
+                    center: tuple[int, int], t_sec: float,
+                    color: tuple[int, int, int]) -> None:
+    """在棋盘上方绘制向上飘并淡出的文字。
+
+    t_sec 为已存活时长；超过 FLOAT_DURATION 不再绘制。
+    """
+    if t_sec >= FLOAT_DURATION:
+        return
+    p = t_sec / FLOAT_DURATION
+    rise = -34 * (p ** 0.7)                 # 逐渐上飘
+    alpha = 1.0 if p < 0.55 else max(1.0 - (p - 0.55) / 0.45, 0.0)
+
+    font = load_font(24, bold=True)
+    img = font.render(text, True, color)
+    img.set_alpha(int(255 * alpha))
+
+    # 描边：画一圈深色底衬，保证在任何背景上都看得清
+    outline = font.render(text, True, (16, 18, 24))
+    outline.set_alpha(int(200 * alpha))
+    x = center[0] - img.get_width() // 2
+    # 起点抬到格子上方，避免与箭头本体重叠
+    y = int(center[1] - 34 + rise)
+    for dx, dy in ((-2, 0), (2, 0), (0, -2), (0, 2)):
+        surface.blit(outline, (x + dx, y + dy))
+    surface.blit(img, (x, y))
+
+
+def float_scale(t_sec: float) -> float:
+    """浮动文字的弹出缩放：先放大超过 1，再回落到 1。"""
+    p = min(t_sec / 0.18, 1.0)
+    if p >= 1.0:
+        return 1.0
+    return 0.6 + 0.55 * p - 0.15 * (p ** 2) * 1.0
+
+
+# --------------------------------------------------------------------------
+# Step 5：碰撞提示条
+# --------------------------------------------------------------------------
+
+def draw_banner(surface: pygame.Surface, rect: pygame.Rect, text: str,
+                color: tuple[int, int, int], alpha: float = 1.0) -> None:
+    """在指定区域绘制一条不透明提示横幅（用于「被挡住了」等反馈）。"""
+    if alpha <= 0.02:
+        return
+    tmp = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+    pygame.draw.rect(tmp, (*color, int(56 * alpha)), tmp.get_rect(),
+                     border_radius=10)
+    pygame.draw.rect(tmp, (*color, int(200 * alpha)), tmp.get_rect(),
+                     width=2, border_radius=10)
+    surface.blit(tmp, rect.topleft)
+
+    font = load_font(20, bold=True)
+    img = font.render(text, True, color)
+    img.set_alpha(int(255 * alpha))
+    surface.blit(img, (rect.x + 14, rect.centery - img.get_height() // 2))

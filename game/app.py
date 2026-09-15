@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import math
 import os
 
 import pygame
@@ -32,12 +31,31 @@ TITLE = "一箭又一箭 · Arrow Again Arrow"
 STATE_START = "start"
 
 # 顶部状态栏区 / 棋盘区 / 底部提示区
-HEADER_H = 96
+HEADER_H = 104
 FOOTER_H = 84
 
 # 动画时长（秒）—— 定义在 view 层，供绘制与逻辑共用，避免两处不一致
 FLY_DURATION = view.FLY_DURATION
-SHAKE_DURATION = view.SHAKE_DURATION
+BLOCK_DURATION = view.BLOCK_DURATION
+FLOAT_DURATION = view.FLOAT_DURATION
+BANNER_DURATION = view.BANNER_DURATION
+
+
+class FloatText:
+    """一条向上飘并淡出的浮动文字。"""
+
+    __slots__ = ("text", "center", "color", "t")
+
+    def __init__(self, text: str, center: tuple[int, int],
+                 color: tuple[int, int, int]) -> None:
+        self.text = text
+        self.center = center
+        self.color = color
+        self.t = 0.0
+
+    @property
+    def alive(self) -> bool:
+        return self.t < FLOAT_DURATION
 
 
 class GameApp:
@@ -71,15 +89,19 @@ class GameApp:
             (WINDOW_W, WINDOW_H), view.BG_TOP, view.BG_BOTTOM
         )
 
-        # 被阻挡晃动用的偏移表：{(row, col): 像素偏移}
-        self._shake: dict[tuple[int, int], float] = {}
-        self._shake_t = 0.0
-
+        # --- 动画状态 ---
         # 正在飞出的箭头：arrow → 已播放时长
         self._flying: dict[Arrow, float] = {}
+        # 正在做碰撞反馈的箭头：arrow → 已播放时长
+        self._blocking: dict[Arrow, float] = {}
+        # 浮动文字列表
+        self._floats: list[FloatText] = []
+        # 顶部提示横幅：(文字, 颜色, 已存活时长)
+        self._banner: tuple[str, tuple[int, int, int], float] | None = None
+        # 失误心跳动
+        self._mistake_pulse = 0.0
 
         self.hover: tuple[int, int] | None = None
-        self.toast: tuple[str, tuple[int, int, int], float] | None = None
 
     # ------------------------------------------------------------------
     # 演示用棋盘（Step 6 换成真实关卡数据）
@@ -100,20 +122,22 @@ class GameApp:
         )
 
     # ------------------------------------------------------------------
-    # 动画辅助
+    # 动画状态
     # ------------------------------------------------------------------
     @property
     def animating(self) -> bool:
         """是否有动画在播 —— 期间忽略点击，防止连点刷失误。"""
-        return bool(self._flying) or bool(self._shake)
+        return bool(self._flying) or bool(self._blocking)
 
-    def _start_shake(self, r: int, c: int) -> None:
-        self._shake[(r, c)] = 0.0
-        self._shake_t = 0.0
+    def _start_collision_feedback(self, arrow: Arrow) -> None:
+        """启动一次碰撞反馈：回弹 + 闪红 + 晃动。"""
+        self._blocking[arrow] = 0.0
 
     def _update_animations(self, dt: float) -> None:
         self._update_flying(dt)
-        self._update_shake(dt)
+        self._update_blocking(dt)
+        self._update_floats(dt)
+        self._update_banner(dt)
 
     def _update_flying(self, dt: float) -> None:
         """推进飞出动画；播完则通知 Session 移除箭头。"""
@@ -130,24 +154,42 @@ class GameApp:
             self._flying.pop(arrow, None)
             self.session.on_fly_finished(arrow)
 
-    def _update_shake(self, dt: float) -> None:
-        """按正弦衰减计算晃动偏移。"""
-        if not self._shake:
-            return
-        self._shake_t += dt
-        if self._shake_t > SHAKE_DURATION:
-            self._shake.clear()
-            return
-        amp = 8.0 * (1 - self._shake_t / SHAKE_DURATION)
-        offset = math.sin(self._shake_t * 46) * amp
-        for key in self._shake:
-            self._shake[key] = offset
+    def _update_blocking(self, dt: float) -> None:
+        """推进碰撞反馈；播完把 blocked 标记清回 idle。"""
+        done: list[Arrow] = []
+        for arrow, t in list(self._blocking.items()):
+            t += dt
+            if t >= BLOCK_DURATION:
+                done.append(arrow)
+            else:
+                self._blocking[arrow] = t
 
-    def _expire_blocked(self) -> None:
-        """晃动结束后把 blocked 标记清回 idle，避免箭头一直红着。"""
-        for a in self.board.arrows:
-            if a.state == BLOCKED and (a.row, a.col) not in self._shake:
-                a.state = IDLE
+        for arrow in done:
+            self._blocking.pop(arrow, None)
+            if arrow.state == BLOCKED:
+                arrow.state = IDLE
+
+    def _update_floats(self, dt: float) -> None:
+        for f in self._floats:
+            f.t += dt
+        self._floats = [f for f in self._floats if f.alive]
+
+    def _update_banner(self, dt: float) -> None:
+        if self._banner is None:
+            return
+        text, color, t = self._banner
+        t += dt
+        self._banner = None if t >= BANNER_DURATION else (text, color, t)
+
+        if self._mistake_pulse > 0:
+            self._mistake_pulse = max(self._mistake_pulse - dt / 0.45, 0.0)
+
+    def _add_float(self, text: str, cell: tuple[int, int],
+                   color: tuple[int, int, int]) -> None:
+        self._floats.append(FloatText(text, self.layout.cell_center(*cell), color))
+
+    def _set_banner(self, text: str, color: tuple[int, int, int]) -> None:
+        self._banner = (text, color, 0.0)
 
     # ------------------------------------------------------------------
     # 事件
@@ -160,7 +202,7 @@ class GameApp:
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE:
                 self.running = False
-            elif event.key == pygame.K_r:
+            elif event.key == pygame.K_r and self.state != STATE_START:
                 self.restart()
             return
 
@@ -178,7 +220,7 @@ class GameApp:
             self.on_click(event.pos)
 
     def on_click(self, pos: tuple[int, int]) -> str:
-        """把屏幕坐标交给 Session 判定，并驱动相应动画。"""
+        """把屏幕坐标交给 Session 判定，并驱动相应动画与反馈。"""
         cell = self.layout.to_cell(pos)
         if cell is None:
             return "empty"
@@ -189,31 +231,41 @@ class GameApp:
 
         r, c = cell
 
-        # 先取「点击前的目标箭头」，一旦 click 把它置为 flying，
+        # 先取「点击前的目标箭头」：一旦 click 把它置为 flying，
         # arrow_at() 就会返回 None（flying 不参与判定），所以必须提前拿。
         target = self.board.arrow_at(r, c)
 
         result = self.session.click(r, c)
 
         if result == "fly":
-            # 这里用预取的 target，不能再调 arrow_at
             if target is not None and target.state == FLYING:
                 self._flying[target] = 0.0
-        elif result == "blocked":
-            self._start_shake(r, c)
-            self._set_toast("被挡住了！失误 -1", view.DANGER)
-        return result
 
-    def _set_toast(self, text: str, color: tuple[int, int, int]) -> None:
-        self.toast = (text, color, 0.0)
+        elif result == "blocked":
+            if target is not None:
+                self._start_collision_feedback(target)
+                self._add_float("失误 -1", (r, c), view.DANGER)
+            self._mistake_pulse = 1.0
+            # 指出被谁挡住了，帮玩家理解规则
+            blocker = self.board.blocking_arrow(target) if target else None
+            if blocker is not None:
+                self._set_banner(
+                    f"被 ({blocker.row}, {blocker.col}) 挡住了！失误 -1", view.DANGER
+                )
+            else:
+                self._set_banner("被挡住了！失误 -1", view.DANGER)
+
+        return result
 
     def restart(self) -> None:
         """重开本关：布局、失误、动画状态全部恢复初始值。"""
         self._flying.clear()
-        self._shake.clear()
-        self._shake_t = 0.0
-        self.toast = None
+        self._blocking.clear()
+        self._floats.clear()
+        self._banner = None
+        self._mistake_pulse = 0.0
         self.hover = None
+
         layout = self.board.snapshot()
         rows, cols = self.board.rows, self.board.cols
         self.session = Session(
@@ -231,8 +283,9 @@ class GameApp:
         self._draw_header()
         view.draw_board(
             self.screen, self.board, self.layout,
-            shake=self._shake, hover=self.hover, flying=self._flying,
+            hover=self.hover, flying=self._flying, blocking=self._blocking,
         )
+        self._draw_floats()
         self._draw_footer()
         pygame.display.flip()
 
@@ -242,38 +295,50 @@ class GameApp:
         pygame.draw.line(self.screen, view.GRID_LINE,
                          (0, HEADER_H - 1), (WINDOW_W, HEADER_H - 1), 2)
 
-        view.draw_text(self.screen, "一箭又一箭", 30,
-                       (40, 22), view.TEXT_MAIN, bold=True)
+        view.draw_text(self.screen, "一箭又一箭", 28,
+                       (40, 18), view.TEXT_MAIN, bold=True)
 
-        info = (
-            f"剩余箭头 {self.board.remaining()}    "
-            f"失误 {self.session.mistakes_left}/3"
+        # 剩余箭头
+        view.draw_text(self.screen, f"剩余箭头 {self.board.remaining()}", 19,
+                       (40, 62), view.TEXT_DIM)
+
+        # 失误次数：图标式显示
+        left = self.session.mistakes_left
+        total = max(self.initial_mistakes, 1)
+        view.draw_text(self.screen, "失误", 19, (232, 62), view.TEXT_DIM)
+        hearts_x = 292
+        view.draw_mistake_hearts(
+            self.screen, (hearts_x, 60), left, total, pulse=self._mistake_pulse
         )
-        view.draw_text(self.screen, info, 20, (40, 62), view.TEXT_DIM)
+        heart_w = total * 22 + (total - 1) * 8
+        view.draw_text(self.screen, f"{left}/{total}", 19,
+                       (hearts_x + heart_w + 14, 62), view.TEXT_DIM)
 
-        # 右上角浮动提示（右对齐）
-        if self.toast is not None:
-            text, color, t = self.toast
-            img = view.load_font(20).render(text, True, color)
-            # 最后 0.3s 淡出
-            remain = 1.1 - t
-            if remain < 0.3:
-                img.set_alpha(max(int(255 * remain / 0.3), 0))
-            self.screen.blit(img, (WINDOW_W - 40 - img.get_width(), 30))
+        # 提示横幅
+        if self._banner is not None:
+            text, color, t = self._banner
+            alpha = 1.0 if t < BANNER_DURATION - 0.35 else \
+                max((BANNER_DURATION - t) / 0.35, 0.0)
+            rect = pygame.Rect(WINDOW_W - 400, 26, 360, 42)
+            view.draw_banner(self.screen, rect, text, color, alpha)
+
+    def _draw_floats(self) -> None:
+        for f in self._floats:
+            view.draw_float_text(self.screen, f.text, f.center, f.t, f.color)
 
     def _draw_footer(self) -> None:
         y = WINDOW_H - FOOTER_H + 18
-        if self.hover is None:
+        if self.animating:
+            hint = "反馈播放中……"
+            color = view.TEXT_DIM
+        elif self.hover is None:
             hint = "点击箭头所在格子进行判定 · 左键操作 · R 重开 · Esc 退出"
             color = view.TEXT_DIM
         else:
             r, c = self.hover
             a = self.board.arrow_at(r, c)
             if a is None:
-                if self.animating:
-                    hint = "动画播放中……"
-                else:
-                    hint = f"格子 ({r}, {c}) 为空"
+                hint = f"格子 ({r}, {c}) 为空"
                 color = view.TEXT_DIM
             else:
                 blocked = self.board.blocking_arrow(a)
@@ -295,14 +360,6 @@ class GameApp:
             for event in pygame.event.get():
                 self.handle_event(event)
             self._update_animations(dt)
-            self._expire_blocked()
-            if self.toast is not None:
-                text, color, t = self.toast
-                t += dt
-                if t > 1.1:
-                    self.toast = None
-                else:
-                    self.toast = (text, color, t)
             self.draw()
         self.shutdown()
         return 0
