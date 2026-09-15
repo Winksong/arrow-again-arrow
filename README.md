@@ -1,1 +1,94 @@
-# arrow-again-arrow
+# arrow-again-arrow · 一箭又一箭
+
+软件工程第二次个人作业（福州大学 2026-01）—— 使用 Python + pygame-ce 实现的益智小游戏。
+
+---
+
+## 游戏规则
+
+- 棋盘为网格，每格为空或放置一个箭头；箭头朝上/下/左/右，不能旋转、不能移动格子。
+- 鼠标左键点击箭头所在格子进行判定，**只看同一行或同一列**：
+  检查该箭头前进方向到棋盘边界之间是否存在其他箭头（中间可以隔空格；阻挡箭头的朝向不计）。
+- **前方无阻挡** → 箭头沿方向飞出棋盘并消失。
+- **被阻挡** → 留在原位并晃动／变红提示，失误次数 -1。
+- 清空当前关卡全部箭头 → 通关，进入下一关。
+- 失误次数减到 0 → 本关失败，可重开。
+- 点击空格或棋盘外不扣失误；消除一个箭头后，原先被挡的箭头可能就有出路。
+
+## 环境要求
+
+- Python 3.11+（开发环境为 3.13）
+- pygame-ce 2.5+
+- pytest（仅测试需要）
+
+## 安装与运行
+
+```bash
+# 1. 创建虚拟环境
+python -m venv .venv
+
+# Windows
+.venv\Scripts\activate
+# macOS / Linux
+source .venv/bin/activate
+
+# 2. 安装依赖
+pip install -r requirements.txt
+
+# 3. 启动游戏
+python main.py
+```
+
+## 运行测试
+
+```bash
+python -m pytest
+```
+
+测试使用 SDL dummy 驱动，**不需要显示器与声卡**，可直接在 CI 或无头环境中运行。
+
+## 目录结构
+
+```text
+arrow-again-arrow/
+├─ main.py                  # 入口：python main.py
+├─ game/
+│  ├─ __init__.py
+│  ├─ model.py              # 规则与数据（不依赖 pygame）
+│  ├─ levels.py             # 固定关卡数据（纯数据）
+│  ├─ solver.py             # 可解性校验 / 求解器
+│  ├─ view.py               # 绘制：棋盘、箭头、面板、动画
+│  └─ app.py                # pygame 主循环 + 状态机 + 鼠标事件
+├─ tests/
+│  ├─ test_smoke.py         # 骨架自检
+│  ├─ test_board.py         # 路径检测 / 边界 / 空格
+│  ├─ test_flow.py          # 作业要求 T01～T06
+│  └─ test_levels.py        # 每关可解、数据合法
+├─ tools/
+│  └─ playtest.py           # 关卡试玩脚本
+├─ requirements.txt
+├─ pytest.ini
+└─ README.md
+```
+
+## 架构原则
+
+**规则逻辑与界面严格分离**：`game/model.py` 不 import pygame，
+因此 T01～T06 自动化测试可以直接调用逻辑层，无需打开窗口。
+
+## AIGC 使用说明
+
+开发过程使用 AIGC 辅助编写代码，AI 生成的内容均经过人工复核与修改，
+关键判定逻辑（路径检测、关卡可解性）由求解器与自动化测试双重验证。
+代表性协作过程记录见博客随笔。
+
+## 开发进度
+
+- [x] Step 0 项目骨架与虚拟环境
+- [ ] Step 1 数据模型
+- [ ] Step 2 路径检测
+- [ ] Step 3 失误与胜负
+- [ ] Step 4 关卡与可解性
+- [ ] Step 5 界面与状态机
+- [ ] Step 6 交互与动画
+- [ ] Step 8 自动化测试 T01～T06
